@@ -16,61 +16,45 @@ import os, time
 import argparse
 import configparser
 from pythonosc import udp_client
+import redis
+import json
 
 
-# ===== Global Variables =====
-global client
 global start
 
 start = True
-
-
-# ===== Config.ini =====
-config = configparser.ConfigParser()
-config.read('config.ini')
-
-
-# ===== Variables (called from config.ini)=====
-
-# What ip & port number OSC sends to.
-osc_ip = config.get('osc', 'ip')
-osc_port = int(config.get('osc', 'port'))
-
-
-# Your phone GPIO pins, using BCIM numbers
-pin_rotaryenable = int(config.get('pin', 'rotaryenable')) #Clockwise Rotary Circuit
-pin_countrotary = int(config.get('pin', 'countrotary'))   #Counter-clockwise Rotary Circuit
-pin_hook = int(config.get('pin', 'hook'))                     #Hook or hangup Switch
-    
-
-# Bouncetimes
-bouncetime_enable = float(config.get('bouncetime', 'enable'))
-bouncetime_rotary = float(config.get('bouncetime', 'rotary'))
-bouncetime_hook = float(config.get('bouncetime', 'hook'))
-
-
-# ===== Test for Network =====    
 
 
 
 # ===== Class Definitions =====
 class Dial():
     client = None
-    
-    def __init__(self, ip, port):
+    redis = None
+
+    def __init__(self):
         self.pulses = 0
         self.number = ""
         self.counting = True
         self.calling = False
-        self.client = OSC(ip, port)
-        
+        self.client = None
+        self.redis = redis.StrictRedis(host='localhost', port=6379, db=0)
+
     def ack_message(self):
         self.client.send_message("Sending null message", 1)
+
+    def send_message(self, message, number):
+        blob = {
+            "message": message,
+            "number": number
+        }
+
+        self.redis.lpush("osc_messages", json.encode(blob))
 
     def startcalling(self):
         self.calling = True
         self.client.send_message("cue/dialling", 1)
-        self.player = subprocess.Popen(["mpg123", "-q", "/home/pi/1MR-Phone/media/dialtone.mp3", ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.player = subprocess.Popen(["mpg123", "-q", "/home/pi/1MR-Phone/media/dialtone.mp3", ],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def stopcalling(self):
         self.calling = False
@@ -86,31 +70,32 @@ class Dial():
                     self.number += "0"
                 else:
                     self.number += str(math.floor(self.pulses / 2))
-                    
+
             self.pulses = 0
-            
-            if self.number == "633": #If you dial "OFF" turns off Phone
+
+            if self.number == "633":  # If you dial "OFF" turns off Phone
                 self.client.send_message("Phone has entered Shutdown", 1)
                 shutdown()
                 return
-            
-            if self.number == "7867": #If you dial "STOP" exits python script, comment out once debugging is complete
+
+            if self.number == "7867":  # If you dial "STOP" exits python script, comment out once debugging is complete
                 self.client.send_message("Phone has closed program, please restart to enable", 1)
                 close()
                 return
-            
+
             elif os.path.isfile("/home/pi/1MR-Phone/media/" + self.number + ".mp3"):
                 print("start player with number = %s" % self.number)
-                
+
                 try:
                     self.player.kill()
-                    
+
                 except:
                     pass
-                
+
                 self.client.send_message("cue/" + self.number + "/fire", self.number)
-                self.player = subprocess.Popen(["mpg123", "/home/pi/1MR-Phone/media/" + self.number + ".mp3", "-q"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
+                self.player = subprocess.Popen(["mpg123", "/home/pi/1MR-Phone/media/" + self.number + ".mp3", "-q"],
+                                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
         print("Stop counting. Got number %s.\n" % self.number)
         self.counting = False
 
@@ -124,31 +109,38 @@ class Dial():
         return self.number
 
     def reset(self):
-        print ("Hangup")
+        print("Hangup")
         self.client.send_message("cue/hangup", 1)
         self.pulses = 0
         self.number = ""
         try:
             self.player.kill()
-            
         except:
             pass
 
 
-#OSC Class - possibly pull out 
-class OSC():
+# OSC Class - possibly pull out
+class OSCClient:
     ip = None
     port = None
     client = None
-    
+    redis = None
+
     def __init__(self, ip, port):
         self.ip = ip
         self.port = port
         self.connect()
-        
+        self.redis = redis.StrictRedis(host='localhost', port=6379, db=0)
+
     def connect(self):
         self.client = udp_client.SimpleUDPClient(self.ip, self.port)
-        
+
+    def process_queue(self):
+        message = json.decode(self.redis.lpop('osc_messages'))
+        result = self.send_message(message['string'], message['number'])
+        if result is False:
+            self.redis.rpush("osc_messages", json.encode(message))
+
     def send_message(self, string, number):
         try:
             self.client.send_message(string, number)
@@ -157,44 +149,70 @@ class OSC():
             print("Couldn't send!!!")
             print("Reconnecting!")
             self.connect()
-                
-                
-                
-            
-            
+            return False
 
 
+def gpio_loop(config):
+    dial = Dial()
+    # Your phone GPIO pins, using BCIM numbers
+    pin_rotary_enable = int(config.get('pin', 'rotaryenable'))  # Clockwise Rotary Circuit
+    pin_count_rotary = int(config.get('pin', 'countrotary'))  # Counter-clockwise Rotary Circuit
+    pin_hook = int(config.get('pin', 'hook'))  # Hook or hangup Switch
 
-# ===== Main Script =====
-def main():
+    bounce_time_enable = float(config.get('bouncetime', 'enable'))
+    bounce_time_rotary = float(config.get('bouncetime', 'rotary'))
+    bounce_time_hook = float(config.get('bouncetime', 'hook'))
 
     # Define Pins
-    rotaryenable = gpiozero.DigitalInputDevice(pin_rotaryenable, pull_up=True, bounce_time=bouncetime_enable)
-    countrotary = gpiozero.DigitalInputDevice(pin_countrotary, pull_up=True, bounce_time=bouncetime_rotary)
-    hook = gpiozero.DigitalInputDevice(pin_hook, pull_up=True, bounce_time=bouncetime_hook)
-    parser = argparse.ArgumentParser()
-    
-    # Configure OSC
-    parser.add_argument("--ip", default=osc_ip, help="The ip of the OSC server")
-    parser.add_argument("--port", type=int, default=osc_port, help="The port the OSC server is listening on")
-    args = parser.parse_args()
-    dial = Dial(ip = args.ip, port = args.port)
-    
-    countrotary.when_deactivated = dial.addpulse
-    countrotary.when_activated = dial.addpulse
-    rotaryenable.when_activated = dial.startcounting
-    rotaryenable.when_deactivated = dial.stopcounting
+    rotary_enable = gpiozero.DigitalInputDevice(pin_rotary_enable, pull_up=True, bounce_time=bounce_time_enable)
+    count_rotary = gpiozero.DigitalInputDevice(pin_count_rotary, pull_up=True, bounce_time=bounce_time_rotary)
+    hook = gpiozero.DigitalInputDevice(pin_hook, pull_up=True, bounce_time=bounce_time_hook)
+
+    count_rotary.when_deactivated = dial.addpulse
+    count_rotary.when_activated = dial.addpulse
+
+    rotary_enable.when_activated = dial.startcounting
+    rotary_enable.when_deactivated = dial.stopcounting
+
     hook.when_activated = dial.stopcalling
     hook.when_deactivated = dial.startcalling
     while True:
         time.sleep(1)
-        
+
+
+def osc_loop(osc_ip, osc_port):
+    osc_object = OSCClient(osc_ip, osc_port)
+    while True:
+        osc_object.process_queue()
+
+
+def main():
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+
+    osc_ip = config.get('osc', 'ip')
+    osc_port = int(config.get('osc', 'port'))
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--ip", default=osc_ip, help="The ip of the OSC server")
+    parser.add_argument("--port", type=int, default=osc_port, help="The port the OSC server is listening on")
+    args = parser.parse_args()
+
+    pid = os.fork()
+    if pid == 0:
+        gpio_loop(config)
+    else:
+        osc_loop(args.ip, args.port)
+
 
 def shutdown():
     subprocess.Popen(["sudo shutdown -h now"], shell=True)
 
+
 def close():
     exit(0)
-        
+
+
 if __name__ == "__main__":
-    main()    
+    main()
