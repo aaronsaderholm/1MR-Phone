@@ -137,7 +137,7 @@ class OSCClient:
 
     def process_queue(self):
         message = json.dumps(self.redis.lpop('osc_messages'))
-        result = self.send_message(mgit aessage['string'], message['number'])
+        result = self.send_message(message['string'], message['number'])
         if result is False:
             self.redis.rpush("osc_messages", json.loads(message))
 
