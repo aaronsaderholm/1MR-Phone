@@ -136,10 +136,10 @@ class OSCClient:
         self.client = udp_client.SimpleUDPClient(self.ip, self.port)
 
     def process_queue(self):
-        message = json.decode(self.redis.lpop('osc_messages'))
-        result = self.send_message(message['string'], message['number'])
+        message = json.dumps(self.redis.lpop('osc_messages'))
+        result = self.send_message(mgit aessage['string'], message['number'])
         if result is False:
-            self.redis.rpush("osc_messages", json.encode(message))
+            self.redis.rpush("osc_messages", json.loads(message))
 
     def send_message(self, string, number):
         try:
