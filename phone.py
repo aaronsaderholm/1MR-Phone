@@ -48,7 +48,7 @@ class Dial():
             "number": number
         }
 
-        self.redis.lpush("osc_messages", json.encode(blob))
+        self.redis.lpush("osc_messages", json.dumps(blob))
 
     def startcalling(self):
         self.calling = True
