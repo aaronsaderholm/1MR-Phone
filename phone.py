@@ -43,12 +43,17 @@ class Dial():
         self.client.send_message("Sending null message", 1)
 
     def send_message(self, message, number):
-        blob = {
+        python_dict = {
             "message": message,
             "number": number
         }
+        json_string = json.dumps(python_dict)
 
-        self.redis.lpush("osc_messages", json.dumps(blob))
+        # Push message onto the redis queue
+        self.redis.lpush("osc_messages", json_string)
+
+        # Truncates list to the newest five entries.
+        self.redis.ltrim("osc_messages", 0, 5)
 
     def startcalling(self):
         self.calling = True
@@ -136,10 +141,15 @@ class OSCClient:
         self.client = udp_client.SimpleUDPClient(self.ip, self.port)
 
     def process_queue(self):
-        message = json.dumps(self.redis.lpop('osc_messages'))
-        result = self.send_message(message['string'], message['number'])
+        json_text = self.redis.lpop('osc_messages')
+        message_dict = json.loads(json_text)
+        result = self.send_message(message_dict['string'], message_dict['number'])
         if result is False:
-            self.redis.rpush("osc_messages", json.loads(message))
+            # Turn message_dict back into JSON and push back into redis
+            # so we can try to send the OSC message again on the next
+            # iteration.
+            json_text = json.dumps(message_dict)
+            self.redis.rpush("osc_messages", json_text)
 
     def send_message(self, string, number):
         try:
@@ -184,6 +194,7 @@ def osc_loop(osc_ip, osc_port):
     osc_object = OSCClient(osc_ip, osc_port)
     while True:
         osc_object.process_queue()
+        time.sleep(0.2)
 
 
 def main():
