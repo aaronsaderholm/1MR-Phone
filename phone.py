@@ -141,7 +141,13 @@ class OSCClient:
         self.client = udp_client.SimpleUDPClient(self.ip, self.port)
 
     def process_queue(self):
+        if self.redis.llen('osc_messages') < 1:
+            return False
         json_text = self.redis.lpop('osc_messages')
+        if not isinstance(json_text, str):
+            print("Got bad Redis message.")
+            return False
+
         message_dict = json.loads(json_text)
         result = self.send_message(message_dict['string'], message_dict['number'])
         if result is False:
